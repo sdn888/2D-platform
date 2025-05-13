@@ -68,31 +68,105 @@ class Player(pygame.sprite.Sprite):
         self.platform_dx = 0
 
     def update(self, keys):
+        # --- Состояние горения ---
         if self.burned and pygame.time.get_ticks() - self.burned_time >= 2000:
             self.image = PLAYER_NORMAL_IMG
+            self.mask = pygame.mask.from_surface(self.image)
             self.burned = False
 
+        # --- Инициализация смещений ---
         dx = 0
+        dy = 0
+
+        # --- Горизонтальное движение ---
         if keys[pygame.K_a]:
             dx = -player_speed
         if keys[pygame.K_d]:
             dx = player_speed
 
-        self.vel_y += gravity
-        dy = self.vel_y
+        # Применяем горизонтальное смещение
+        self.rect.x += dx
+        # Проверяем границы экрана по горизонтали
+        self.rect.x = max(0, min(WIDTH - self.rect.width, self.rect.x))
+        # Здесь можно добавить проверку столкновений со стенами, если они есть
 
+        # --- Вертикальное движение ---
+        # Сначала предполагаем, что не на земле
         self.on_ground = False
-        self.platform_dx = 0
 
-        future_rect = self.rect.move(0, dy)
-        for platform in platform_group:
-            if platform.rect.colliderect(future_rect):
-                # Игрок падает сверху на платформу
-                if self.vel_y > 0 and self.rect.bottom <= platform.rect.top + 10:
-                    dy = platform.rect.top - self.rect.bottom
-                    self.vel_y = 0
-                    self.on_ground = True
-                    self.platform_dx = platform.speed if platform.moving else 0
+        # Применяем гравитацию
+        self.vel_y += gravity
+        # Ограничиваем скорость падения (опционально, но полезно)
+        if self.vel_y > 15:  # Максимальная скорость падения
+            self.vel_y = 15
+        dy += self.vel_y  # Добавляем вертикальную скорость к смещению
+
+        # Сохраняем текущую позицию Y перед движением
+        previous_y = self.rect.y
+
+        # Предварительно применяем вертикальное смещение
+        self.rect.y += dy
+
+        # Проверка столкновений по вертикали
+        for p in platform_group:
+            # Проверяем, столкнулся ли игрок с платформой
+            if p.rect.colliderect(self.rect):
+                # Если движемся ВНИЗ (сталкиваемся с верхом платформы)
+                if self.vel_y > 0:
+                    # Ставим низ игрока ТОЧНО на верх платформы
+                    self.rect.bottom = p.rect.top
+                    self.vel_y = 0  # Останавливаем вертикальное движение
+                    self.on_ground = True  # Теперь точно на земле
+                    dy = 0  # Отменяем оставшееся смещение dy в этом кадре
+                    break  # Нашли опору, дальше не проверяем
+
+                # Если движемся ВВЕРХ (сталкиваемся с низом платформы)
+                elif self.vel_y < 0 and not p.can_pass_through:
+                    # Ставим верх игрока ТОЧНО под низ платформы
+                    self.rect.top = p.rect.bottom
+                    self.vel_y = 0  # Останавливаем вертикальное движение
+                    dy = 0  # Отменяем оставшееся смещение dy
+                    # self.on_ground не меняем
+                    break  # Ударились о потолок
+
+        # Если после проверки столкновений мы все еще "на земле" (не было отрыва),
+        # учитываем горизонтальное движение платформы
+        if self.on_ground:
+            self.rect.x += (p.speed * p.direction if hasattr(p, 'moving') and p.moving and p.rect.colliderect(self.rect) else 0)
+
+        # Проверка нижней границы экрана (если упал ниже платформ)
+        if self.rect.bottom > HEIGHT:
+            self.rect.bottom = HEIGHT
+            self.vel_y = 0
+            self.on_ground = True  # Считаем пол уровнем земли
+
+        # Возвращаем Y на предыдущее значение, чтобы проверить, оторвались ли мы от земли
+        self.rect.y = previous_y
+        # Снова применяем вертикальное смещение
+        self.rect.y += self.vel_y
+
+        # После применения вертикального движения окончательно проверяем, на земле ли мы
+        self.on_ground = False
+        for p in platform_group:
+            if p.rect.colliderect(self.rect.x, self.rect.y + 1, self.rect.width, self.rect.height) and self.vel_y >= 0:
+                self.on_ground = True
+                self.rect.bottom = p.rect.top
+                self.vel_y = 0
+                break
+
+        # Применяем остаточное горизонтальное смещение от платформы (если есть и мы на земле)
+        self.rect.x += (p.speed * p.direction if self.on_ground and hasattr(p, 'moving') and p.moving and p.rect.colliderect(self.rect) else 0)
+
+        # Финальные проверки границ
+        self.rect.x = max(0, min(WIDTH - self.rect.width, self.rect.x))
+        self.rect.y = min(HEIGHT - self.rect.height, self.rect.y)
+
+    def jump(self):
+        if self.on_ground:
+            self.vel_y = jump_power
+            self.on_ground = False # Сразу после прыжка перестаем быть на земле
+            if sound_enabled:
+                jump_sound.play()
 
         self.rect.x += dx + (self.platform_dx if self.on_ground else 0)
         self.rect.x = max(0, min(WIDTH - self.rect.width, self.rect.x))
@@ -115,14 +189,20 @@ class Player(pygame.sprite.Sprite):
 
 
 class Platform(pygame.sprite.Sprite):
-    def __init__(self, x, y, w, h, moving=False, speed=0):
+    def __init__(self, x, y, w, h, moving=False, speed=0, can_pass_through=False, image_path=None):
         super().__init__()
-        self.image = pygame.Surface((w, h))
-        self.image.fill((100, 100, 100))
+        if image_path:
+            original_image = pygame.image.load(image_path).convert_alpha()
+            self.image = pygame.transform.scale(original_image, (w, h))
+        else:
+            self.image = pygame.Surface((w, h))
+            self.image.fill((100, 100, 100))  # Цвет по умолчанию
+
         self.rect = self.image.get_rect(topleft=(x, y))
         self.moving = moving
         self.speed = speed
         self.direction = 1
+        self.can_pass_through = can_pass_through
 
     def update(self):
         if self.moving:
@@ -170,11 +250,13 @@ def generate_random_level(level_num):
     coins = []
 
     # Начальная платформа (пол)
-    start_platform = Platform(0, HEIGHT - 40, WIDTH, 40)
+    start_platform = Platform(0, HEIGHT - 40, WIDTH, 40, "images/ground.png") # Пример пути к изображению земли
     platforms.append(start_platform)
 
     last_platform = start_platform
     total_platforms = 3 + level_num * 2
+
+    platform_images = ["images/platform1.png", "images/platform2.png"]  # Список возможных изображений платформ
 
     for _ in range(total_platforms):
         attempts = 0
@@ -193,7 +275,9 @@ def generate_random_level(level_num):
 
             moving = random.random() < 0.3
             speed = random.randint(1, 3) if moving else 0
-            candidate = Platform(x, y, w, h, moving, speed)
+            pass_through = random.random() < 0.2
+            image_path = random.choice(platform_images)
+            candidate = Platform(x, y, w, h, moving, speed, pass_through)
 
             if can_reach(last_platform, candidate):
                 coin_x = x + w // 2
